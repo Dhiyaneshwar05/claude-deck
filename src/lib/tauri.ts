@@ -1,0 +1,35 @@
+import { invoke } from "@tauri-apps/api/core";
+import type { DiscoveredSession, SpawnedSessionInfo } from "../types";
+
+export async function listSessions(): Promise<DiscoveredSession[]> {
+  return invoke<DiscoveredSession[]>("list_sessions");
+}
+
+export async function checkSessionHealth(pid: number): Promise<boolean> {
+  return invoke<boolean>("check_session_health", { pid });
+}
+
+export async function createSession(
+  cwd: string,
+  prompt: string,
+  model?: string,
+  resumeSessionId?: string,
+): Promise<SpawnedSessionInfo> {
+  return invoke<SpawnedSessionInfo>("create_session", {
+    cwd,
+    prompt,
+    model: model ?? null,
+    resumeSessionId: resumeSessionId ?? null,
+  });
+}
+
+export async function sendPrompt(
+  sessionId: string,
+  prompt: string,
+): Promise<void> {
+  return invoke("send_prompt", { sessionId, prompt });
+}
+
+export async function cancelSession(sessionId: string): Promise<void> {
+  return invoke("cancel_session", { sessionId });
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicholasio/tauri-settings-schema/main/schema.json",
+  "productName": "Claude Deck",
+  "version": "0.1.0",
+  "identifier": "com.dhiyaneshwar.claudedeck",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Claude Deck",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "titleBarStyle": "Overlay"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    }
+  }
+}

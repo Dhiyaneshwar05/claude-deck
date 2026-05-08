@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+:root {
+  font-family: Inter, system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background-color: #0a0a0f;
+  color: #e4e4e7;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #27272a;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46;
+}
+
+/* Tauri title bar drag region */
+[data-tauri-drag-region] {
+  -webkit-app-region: drag;
+}
