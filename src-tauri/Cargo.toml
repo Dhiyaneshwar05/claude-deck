@@ -21,6 +21,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
 libc = "0.2"
-tokio = { version = "1", features = ["process", "io-util", "sync", "rt"] }
+tokio = { version = "1", features = ["process", "io-util", "sync", "rt", "time", "net", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 which = "7"
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
+regex = "1"

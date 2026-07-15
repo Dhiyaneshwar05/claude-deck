@@ -74,6 +74,28 @@ fn load_session_metadata() -> HashMap<String, SessionMetadata> {
     metadata
 }
 
+/// Extract user-visible text from a user message's `message` field.
+/// Handles both string content ("hello") and array content ([{type:"text",text:"hello"}]).
+/// Returns None for tool_result-only messages.
+fn extract_user_text(message: Option<&serde_json::Value>) -> Option<String> {
+    let msg = message?;
+    let content = msg.get("content")?;
+    if let Some(s) = content.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(arr) = content.as_array() {
+        for part in arr {
+            let part_type = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            if part_type == "text" {
+                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                    return Some(text.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Extract metadata from a single JSONL conversation file
 fn extract_metadata_from_jsonl(path: &std::path::Path) -> Option<SessionMetadata> {
     let file = fs::File::open(path).ok()?;
@@ -82,6 +104,7 @@ fn extract_metadata_from_jsonl(path: &std::path::Path) -> Option<SessionMetadata
 
     for line in reader.lines().map_while(Result::ok) {
         // Fast path: check record type via string contains before parsing
+        // (Legacy: older Claude versions wrote explicit ai-title records)
         if line.contains("\"ai-title\"") {
             if let Ok(record) = serde_json::from_str::<AiTitleRecord>(&line) {
                 if record.record_type == "ai-title" && !record.ai_title.is_empty() {
@@ -98,7 +121,37 @@ fn extract_metadata_from_jsonl(path: &std::path::Path) -> Option<SessionMetadata
 
         // Parse user/assistant messages for stats
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+            // Capture entrypoint & version from any record that carries them
+            if meta.transcript_entrypoint.is_none() {
+                if let Some(ep) = val.get("entrypoint").and_then(|v| v.as_str()) {
+                    if !ep.is_empty() {
+                        meta.transcript_entrypoint = Some(ep.to_string());
+                    }
+                }
+            }
+            if meta.cli_version.is_none() {
+                if let Some(ver) = val.get("version").and_then(|v| v.as_str()) {
+                    if !ver.is_empty() {
+                        meta.cli_version = Some(ver.to_string());
+                    }
+                }
+            }
+
             match val.get("type").and_then(|t| t.as_str()) {
+                Some("last-prompt") => {
+                    if let Some(prompt) = val.get("lastPrompt").and_then(|p| p.as_str()) {
+                        let trimmed = prompt.trim();
+                        if !trimmed.is_empty() {
+                            // Last-prompt wins: overwrite any prior value (newest record is canonical)
+                            meta.last_prompt = Some(if trimmed.chars().count() > 120 {
+                                let truncated: String = trimmed.chars().take(117).collect();
+                                format!("{}...", truncated)
+                            } else {
+                                trimmed.to_string()
+                            });
+                        }
+                    }
+                }
                 Some("user") => {
                     meta.message_count += 1;
                     if meta.git_branch.is_none() {
@@ -108,14 +161,38 @@ fn extract_metadata_from_jsonl(path: &std::path::Path) -> Option<SessionMetadata
                             }
                         }
                     }
+                    // Tool-error detection: user messages wrapping tool_result with is_error=true
+                    if let Some(content) = val.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+                        for part in content {
+                            let is_tool_result = part.get("type").and_then(|t| t.as_str()) == Some("tool_result");
+                            let is_error = part.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false);
+                            if is_tool_result && is_error {
+                                meta.failed_tool_count += 1;
+                            }
+                        }
+                    }
+                    // Title from first user message (matches clui-cc behavior).
+                    // Skip tool_result messages — those have array content with type=tool_result.
+                    if meta.title.is_none() {
+                        if let Some(text) = extract_user_text(val.get("message")) {
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty() {
+                                meta.title = Some(if trimmed.chars().count() > 60 {
+                                    let truncated: String = trimmed.chars().take(57).collect();
+                                    format!("{}...", truncated)
+                                } else {
+                                    trimmed.to_string()
+                                });
+                            }
+                        }
+                    }
                 }
                 Some("assistant") => {
                     meta.message_count += 1;
                     if let Some(msg) = val.get("message") {
-                        if meta.model.is_none() {
-                            if let Some(model) = msg.get("model").and_then(|m| m.as_str()) {
-                                meta.model = Some(model.to_string());
-                            }
+                        // Keep the *latest* model (sessions can switch mid-conversation)
+                        if let Some(model) = msg.get("model").and_then(|m| m.as_str()) {
+                            meta.model = Some(model.to_string());
                         }
                         if let Some(usage) = msg.get("usage") {
                             meta.total_input_tokens += usage
@@ -128,6 +205,10 @@ fn extract_metadata_from_jsonl(path: &std::path::Path) -> Option<SessionMetadata
                                 .unwrap_or(0);
                             meta.total_cache_read_tokens += usage
                                 .get("cache_read_input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            meta.total_cache_creation_tokens += usage
+                                .get("cache_creation_input_tokens")
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or(0);
                         }
@@ -225,6 +306,11 @@ pub fn scan_sessions() -> Vec<DiscoveredSession> {
             total_input_tokens: meta.map_or(0, |m| m.total_input_tokens),
             total_output_tokens: meta.map_or(0, |m| m.total_output_tokens),
             total_cache_read_tokens: meta.map_or(0, |m| m.total_cache_read_tokens),
+            total_cache_creation_tokens: meta.map_or(0, |m| m.total_cache_creation_tokens),
+            last_prompt: meta.and_then(|m| m.last_prompt.clone()),
+            failed_tool_count: meta.map_or(0, |m| m.failed_tool_count),
+            transcript_entrypoint: meta.and_then(|m| m.transcript_entrypoint.clone()),
+            cli_version: meta.and_then(|m| m.cli_version.clone()),
         });
     }
 

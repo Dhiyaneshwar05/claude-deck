@@ -14,7 +14,7 @@
 - [x] Session deselection (sidebar toggle + X button)
 
 ## Phase 2: Chat Engine
-**Status: In Progress (~80%)**
+**Status: Code-complete, pending live verification**
 
 ### Done
 - [x] ProcessPool in Rust (spawn `claude -p --stream-json`, manage stdin/stdout/stderr)
@@ -29,39 +29,50 @@
 - [x] Hub sessions visible in sidebar with status
 - [x] Stderr forwarding to frontend as error events
 - [x] Environment propagation for macOS GUI (PATH, HOME, USER, SHELL)
+- [x] Stdin flush on initial prompt (was missing — likely "Connecting..." culprit)
+- [x] Session title extraction updated to first-user-message (matches clui-cc; `ai-title` records no longer emitted)
+- [x] Sidebar enrichment: last-prompt preview, failed-tool badge, entrypoint icon, cache-creation tokens, cli_version
+- [x] Markdown rendering in assistant messages (react-markdown + remark-gfm + Tailwind-styled components)
+
+- [x] Code block syntax highlighting (rehype-highlight + highlight.js github-dark theme)
+- [x] Follow-up prompts to completed sessions (already wired via InputBar.canSendFollowUp)
+- [x] Cancel button wired to SIGINT (Stop button now calls cancelActiveSession → SIGINT + 5s SIGKILL fallback)
 
 ### Remaining
-- [ ] Debug/verify Claude process spawning works end-to-end
-- [ ] Markdown rendering in assistant messages (react-markdown + remark-gfm)
-- [ ] Code block syntax highlighting (rehype-highlight or shiki)
-- [ ] Follow-up prompts to completed sessions
-- [ ] Cancel button wired to SIGINT
+- [ ] Debug/verify Claude process spawning works end-to-end (needs live run after flush fix)
 
 ## Phase 3: Permission Hub
-**Status: Not Started**
+**Status: MVP code-complete, scoped to hub-spawned sessions**
 
-This is the killer feature. All Claude sessions (including Cursor/VS Code/terminal) route permissions through Agent Hub.
+**Decision:** Started with per-run temp settings files (clui-cc approach), not global `~/.claude/settings.json` injection. Global injection is a future toggle; per-run is safer on crash and can't interfere with the user's own hooks.
 
-**Key discovery:** Claude Code watches `~/.claude/settings.json` with a file watcher. Hooks added there apply to ALL sessions and are picked up immediately without restart.
+### Architecture (implemented)
+- Rust axum server on `127.0.0.1:19837` (auto-increments to 19900 on port conflict)
+- Two-layer URL auth: `appSecret` (per app launch) + `runToken` (per spawned session)
+- Per-run temp settings file at `$TMPDIR/claude-deck-hook-config/claude-deck-hook-<token>.json`, passed to `claude --settings <path>`
+- PreToolUse matcher: `^(Bash|Edit|Write|MultiEdit|mcp__.*)$` (other tools bypass via `--allowedTools`)
+- 5-minute fail-closed timeout matching claude's `timeout: 300`
+- Sensitive field masking before emitting to the UI (token/password/secret/auth/credential/apikey)
+- Safe-bash whitelist: ls, pwd, cat, grep, find, git {status,log,diff,show,branch -l}, etc. Auto-approved without UI.
 
-### Architecture
-- Agent Hub starts HTTP PermissionServer on `127.0.0.1:19837`
-- On launch: inject PreToolUse HTTP hook into `~/.claude/settings.json`
-- All running Claude sessions immediately start routing permission requests to Agent Hub
-- On quit: remove the hook from settings.json (cleanup)
+### Done
+- [x] Rust: PermissionServer (axum on 127.0.0.1:19837, auto-incrementing port)
+- [x] Rust: Per-run hook settings file generator + cleanup on exit
+- [x] Rust: Permission request routing via runToken (no session_id lookup needed)
+- [x] Rust: Safe bash command whitelist (auto-approve read-only)
+- [x] Rust: 5-minute auto-deny timeout
+- [x] Rust: Sensitive field masking in tool_input before UI emission
+- [x] Rust: Commands `resolve_permission`, `get_permission_server_info`
+- [x] Frontend: PermissionOverlay (bottom-right card, Allow / Allow-session / Deny)
+- [x] Frontend: usePermissionEvents listener
+- [x] Frontend: Store actions `addPermission`, `decidePermission`
 
-### Tasks
-- [ ] Rust: PermissionServer (axum/hyper HTTP server on 127.0.0.1:19837)
-- [ ] Rust: Hook injection — read/write `~/.claude/settings.json` on app launch/quit
-- [ ] Rust: Permission request routing (session identification via token/metadata)
-- [ ] Rust: Safe bash command whitelist (auto-approve read-only: git status, ls, cat, etc.)
-- [ ] Rust: 5-minute auto-deny timeout with countdown
-- [ ] Rust: Sensitive field masking (tokens, passwords, keys in tool inputs)
-- [ ] Frontend: PermissionCard component (tool name, input preview, approve/deny/allow-session)
-- [ ] Frontend: PermissionQueue in sidebar with badge count
-- [ ] Frontend: Permission notification sound (configurable)
-- [ ] Frontend: macOS notification when app is in background (Tauri notification API)
-- [ ] Scoped allows: "Allow Edit for this session", "Allow Bash for this session"
+### Remaining
+- [ ] Frontend: Permission queue badge in sidebar
+- [ ] Frontend: Macos notification when app is in background (Tauri notification API)
+- [ ] Frontend: Notification sound (configurable)
+- [ ] Rust: Scoped allow-domain for WebFetch (parse hostname from tool_input.url)
+- [ ] Future: Optional global `~/.claude/settings.json` injection for Cursor/VS Code/terminal coverage
 
 ## Phase 4: Agent Profiles + History
 **Status: Not Started**

@@ -14,6 +14,11 @@ export interface DiscoveredSession {
   total_input_tokens: number;
   total_output_tokens: number;
   total_cache_read_tokens: number;
+  total_cache_creation_tokens: number;
+  last_prompt: string | null;
+  failed_tool_count: number;
+  transcript_entrypoint: string | null;
+  cli_version: string | null;
 }
 
 export interface SessionGroup {
@@ -65,6 +70,26 @@ export type NormalizedEvent =
 export interface SessionEvent {
   session_id: string;
   event: NormalizedEvent;
+}
+
+// ── Permission hub ──────────────────────────────────────────
+
+export type PermissionDecision =
+  | "allow"
+  | "allow-session"
+  | "allow-domain"
+  | "deny";
+
+export interface PendingPermission {
+  request_id: string;
+  run_token: string;
+  tab_id: string;
+  tool_name: string;
+  tool_input: unknown;
+  session_id: string;
+  cwd: string;
+  /** Client-side: when we received the request, for elapsed-time display */
+  received_at: number;
 }
 
 export type HubSessionStatus =

@@ -4,8 +4,16 @@ import type {
   HubSession,
   ChatMessage,
   SessionEvent,
+  PendingPermission,
+  PermissionDecision,
 } from "../types";
-import { listSessions, createSession, sendPrompt } from "../lib/tauri";
+import {
+  listSessions,
+  createSession,
+  sendPrompt,
+  cancelSession as cancelSessionIpc,
+  resolvePermission as resolvePermissionIpc,
+} from "../lib/tauri";
 
 let msgCounter = 0;
 function nextMsgId(): string {
@@ -24,6 +32,9 @@ interface AppState {
   // Hub-spawned sessions (keyed by session_id)
   hubSessions: Record<string, HubSession>;
 
+  // Pending permission requests (keyed by request_id)
+  pendingPermissions: Record<string, PendingPermission>;
+
   // Actions — discovery
   refreshSessions: () => Promise<void>;
   selectSession: (sessionId: string | null) => void;
@@ -32,7 +43,15 @@ interface AppState {
   // Actions — chat
   startSession: (cwd: string, prompt: string, model?: string) => Promise<void>;
   sendMessage: (prompt: string) => Promise<void>;
+  cancelActiveSession: () => Promise<void>;
   handleSessionEvent: (payload: SessionEvent) => void;
+
+  // Actions — permissions
+  addPermission: (perm: PendingPermission) => void;
+  decidePermission: (
+    requestId: string,
+    decision: PermissionDecision,
+  ) => Promise<void>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -41,6 +60,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   sidebarSection: "sessions",
   activeSessionId: null,
   hubSessions: {},
+  pendingPermissions: {},
 
   refreshSessions: async () => {
     try {
@@ -131,6 +151,44 @@ export const useAppStore = create<AppState>((set, get) => ({
       await sendPrompt(activeSessionId, prompt);
     } catch (err) {
       console.error("Failed to send prompt:", err);
+    }
+  },
+
+  cancelActiveSession: async () => {
+    const { activeSessionId, hubSessions } = get();
+    if (!activeSessionId || !(activeSessionId in hubSessions)) return;
+    try {
+      await cancelSessionIpc(activeSessionId);
+    } catch (err) {
+      console.error("Failed to cancel session:", err);
+    }
+  },
+
+  addPermission: (perm) =>
+    set((state) => ({
+      pendingPermissions: {
+        ...state.pendingPermissions,
+        [perm.request_id]: perm,
+      },
+    })),
+
+  decidePermission: async (requestId, decision) => {
+    const perm = get().pendingPermissions[requestId];
+    if (!perm) return;
+    // Optimistically drop it from the queue
+    set((state) => {
+      const next = { ...state.pendingPermissions };
+      delete next[requestId];
+      return { pendingPermissions: next };
+    });
+    try {
+      await resolvePermissionIpc(requestId, perm.run_token, decision);
+    } catch (err) {
+      console.error("Failed to resolve permission:", err);
+      // Put it back so the user can retry
+      set((state) => ({
+        pendingPermissions: { ...state.pendingPermissions, [requestId]: perm },
+      }));
     }
   },
 

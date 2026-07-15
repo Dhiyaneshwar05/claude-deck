@@ -61,6 +61,16 @@ pub struct DiscoveredSession {
     pub total_output_tokens: u64,
     /// Total cache read tokens
     pub total_cache_read_tokens: u64,
+    /// Total cache-creation tokens (expensive; separate from cache_read for cost math)
+    pub total_cache_creation_tokens: u64,
+    /// Most recent user prompt (from `last-prompt` records)
+    pub last_prompt: Option<String>,
+    /// Count of tool calls that returned `is_error: true`
+    pub failed_tool_count: u32,
+    /// Launch origin from the transcript (e.g. "claude-vscode", "cli", "claude-code")
+    pub transcript_entrypoint: Option<String>,
+    /// Claude CLI version recorded in the transcript (e.g. "2.1.138")
+    pub cli_version: Option<String>,
 }
 
 /// Enriched metadata extracted from a session's JSONL conversation file
@@ -73,4 +83,9 @@ pub struct SessionMetadata {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub total_cache_read_tokens: u64,
+    pub total_cache_creation_tokens: u64,
+    pub last_prompt: Option<String>,
+    pub failed_tool_count: u32,
+    pub transcript_entrypoint: Option<String>,
+    pub cli_version: Option<String>,
 }

@@ -12,6 +12,7 @@ export function InputBar() {
   const hubSessions = useAppStore((s) => s.hubSessions);
   const startSession = useAppStore((s) => s.startSession);
   const sendMessage = useAppStore((s) => s.sendMessage);
+  const cancelActiveSession = useAppStore((s) => s.cancelActiveSession);
 
   const activeHub = activeSessionId ? hubSessions[activeSessionId] : null;
   const isRunning = activeHub?.status === "running" || activeHub?.status === "connecting";
@@ -64,6 +65,14 @@ export function InputBar() {
 
   const canSubmit = input.trim().length > 0 && !isRunning;
 
+  const handleButtonClick = () => {
+    if (isRunning) {
+      void cancelActiveSession();
+    } else {
+      handleSubmit();
+    }
+  };
+
   return (
     <div className="border-t border-zinc-800/50 bg-zinc-950/80 backdrop-blur-sm px-4 py-3">
       {/* New session CWD picker (shown when no hub session active) */}
@@ -93,9 +102,14 @@ export function InputBar() {
           className="flex-1 bg-zinc-900 text-zinc-200 text-sm rounded-lg px-3 py-2.5 border border-zinc-800 focus:border-zinc-600 focus:outline-none resize-none placeholder:text-zinc-600 disabled:opacity-50 disabled:cursor-not-allowed"
         />
         <button
-          onClick={handleSubmit}
-          disabled={!canSubmit}
-          className="shrink-0 w-9 h-9 rounded-lg flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-emerald-600 hover:bg-emerald-500 text-white"
+          onClick={handleButtonClick}
+          disabled={!isRunning && !canSubmit}
+          title={isRunning ? "Stop (SIGINT)" : "Send (Cmd+Enter)"}
+          className={`shrink-0 w-9 h-9 rounded-lg flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed text-white ${
+            isRunning
+              ? "bg-rose-600 hover:bg-rose-500"
+              : "bg-emerald-600 hover:bg-emerald-500"
+          }`}
         >
           {isRunning ? (
             <Stop size={16} weight="fill" />

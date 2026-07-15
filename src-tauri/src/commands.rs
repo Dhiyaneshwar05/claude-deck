@@ -1,5 +1,9 @@
-use tauri::{AppHandle, State};
+use std::sync::Arc;
 
+use serde::Serialize;
+use tauri::{AppHandle, Manager, State};
+
+use crate::permissions::{PermissionDecision, PermissionServer};
 use crate::process::pool::{ProcessPool, SpawnedSessionInfo};
 use crate::session::discovery;
 use crate::session::types::DiscoveredSession;
@@ -79,4 +83,36 @@ pub fn debug_info() -> String {
     info.push(format!("HOME: {:?}", dirs::home_dir()));
 
     info.join("\n")
+}
+
+#[derive(Serialize)]
+pub struct PermissionServerInfo {
+    pub port: u16,
+    pub app_secret: String,
+}
+
+/// Frontend wants to know whether the permission server is up + on what port.
+/// Returns None if the server hasn't finished booting yet.
+#[tauri::command]
+pub fn get_permission_server_info(app: AppHandle) -> Option<PermissionServerInfo> {
+    app.try_state::<Arc<PermissionServer>>().map(|s| PermissionServerInfo {
+        port: s.port,
+        app_secret: s.app_secret.clone(),
+    })
+}
+
+/// Frontend calls this when the user clicks Allow/Deny on a permission prompt.
+#[tauri::command]
+pub async fn resolve_permission(
+    app: AppHandle,
+    request_id: String,
+    run_token: String,
+    decision: PermissionDecision,
+) -> Result<(), String> {
+    let server = app
+        .try_state::<Arc<PermissionServer>>()
+        .ok_or("Permission server not ready")?
+        .inner()
+        .clone();
+    server.resolve(&request_id, decision, &run_token).await
 }

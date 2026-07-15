@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
 use super::events::{normalize_event, NormalizedEvent, SessionEvent};
+use crate::permissions::PermissionServer;
 
 /// Info about a spawned session returned to the frontend.
 #[derive(Debug, Clone, Serialize)]
@@ -29,6 +30,8 @@ struct ProcessHandle {
     stderr_tail: Vec<String>,
     /// PID of the child process.
     pid: u32,
+    /// Run token registered with the permission server (None if server wasn't ready).
+    run_token: Option<String>,
 }
 
 /// Manages all spawned Claude Code subprocesses.
@@ -149,6 +152,16 @@ impl ProcessPool {
         // Generate a temporary session ID; the real one comes from session_init event.
         let temp_id = uuid::Uuid::new_v4().to_string();
 
+        // Register a per-run token so allow-session scoping can route by session,
+        // even though the actual PreToolUse hook is installed globally in
+        // ~/.claude/settings.json (covers Cursor, VS Code, terminal, hub-spawned).
+        let run_token = if let Some(server) = app.try_state::<Arc<PermissionServer>>() {
+            let server = server.inner().clone();
+            Some(server.register_run(temp_id.clone(), temp_id.clone()).await)
+        } else {
+            None
+        };
+
         let mut cmd = Command::new(&claude_bin);
         // Set the merged environment (parent env + login shell overrides)
         cmd.env_clear();
@@ -199,6 +212,10 @@ impl ProcessPool {
             .write_all(msg_line.as_bytes())
             .await
             .map_err(|e| format!("Failed to write prompt: {}", e))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| format!("Failed to flush prompt: {}", e))?;
 
         // Store the handle
         let session_id = resume_session_id.unwrap_or(temp_id);
@@ -212,6 +229,7 @@ impl ProcessPool {
                     stdin,
                     stderr_tail: Vec::new(),
                     pid,
+                    run_token: run_token.clone(),
                 },
             );
         }
@@ -324,16 +342,22 @@ impl ProcessPool {
         let status = child.wait().await;
         let exit_code = status.ok().and_then(|s| s.code());
 
-        // Grab stderr tail before removing handle
-        let stderr_tail = {
+        // Grab stderr tail + cleanup info before removing handle
+        let (stderr_tail, run_token) = {
             let mut map = handles.lock().await;
-            let tail = map
-                .get(&session_id)
-                .map(|h| h.stderr_tail.clone())
-                .unwrap_or_default();
+            let info = map.get(&session_id).map(|h| {
+                (h.stderr_tail.clone(), h.run_token.clone())
+            }).unwrap_or_default();
             map.remove(&session_id);
-            tail
+            info
         };
+
+        // Clean up permission server registration
+        if let Some(token) = run_token {
+            if let Some(server) = app.try_state::<Arc<PermissionServer>>() {
+                server.inner().clone().unregister_run(&token).await;
+            }
+        }
 
         let payload = SessionEvent {
             session_id,

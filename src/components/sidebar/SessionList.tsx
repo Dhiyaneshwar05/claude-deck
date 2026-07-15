@@ -3,7 +3,25 @@ import { useAppStore } from "../../stores/appStore";
 import { StatusDot } from "../shared/StatusDot";
 import { formatUptime, formatEntrypoint } from "../../lib/format";
 import type { DiscoveredSession, HubSession, SessionGroup } from "../../types";
-import { Folder, Terminal, Lightning } from "@phosphor-icons/react";
+import {
+  Folder,
+  Terminal,
+  Lightning,
+  FileCode,
+  Cursor,
+  Warning,
+} from "@phosphor-icons/react";
+
+/**
+ * Best-effort classification of the entrypoint. Transcript entrypoint
+ * (from JSONL) is more reliable than the legacy session-file field.
+ */
+function entrypointIcon(session: DiscoveredSession) {
+  const ep = (session.transcript_entrypoint || session.entrypoint || "").toLowerCase();
+  if (ep.includes("vscode")) return <FileCode size={12} weight="fill" className="text-blue-400" />;
+  if (ep.includes("cursor")) return <Cursor size={12} weight="fill" className="text-purple-400" />;
+  return <Terminal size={12} weight="fill" className="text-zinc-500" />;
+}
 
 function groupByProject(sessions: DiscoveredSession[]): SessionGroup[] {
   const map = new Map<string, DiscoveredSession[]>();
@@ -27,23 +45,45 @@ function SessionItem({ session }: { session: DiscoveredSession }) {
   const activeSessionId = useAppStore((s) => s.activeSessionId);
   const selectSession = useAppStore((s) => s.selectSession);
   const isActive = activeSessionId === session.session_id;
+  const entrypointLabel = formatEntrypoint(
+    session.transcript_entrypoint || session.entrypoint
+  );
 
   return (
     <button
       onClick={() =>
         selectSession(isActive ? null : session.session_id)
       }
-      className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-left transition-colors ${
+      className={`w-full flex items-start gap-2.5 px-3 py-2 rounded-lg text-left transition-colors ${
         isActive
           ? "bg-zinc-800 text-zinc-100"
           : "text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-300"
       }`}
     >
-      <StatusDot alive={session.is_alive} />
+      <div className="pt-1">
+        <StatusDot alive={session.is_alive} />
+      </div>
       <div className="flex-1 min-w-0">
-        <div className="text-sm truncate">{session.title}</div>
-        <div className="flex items-center gap-2 text-xs text-zinc-500">
-          <span>{formatEntrypoint(session.entrypoint)}</span>
+        <div className="flex items-center gap-1.5">
+          <div className="text-sm truncate flex-1">{session.title}</div>
+          {session.failed_tool_count > 0 && (
+            <span
+              title={`${session.failed_tool_count} failed tool call${session.failed_tool_count === 1 ? "" : "s"}`}
+              className="flex items-center gap-0.5 text-[10px] text-rose-400 shrink-0"
+            >
+              <Warning size={10} weight="fill" />
+              {session.failed_tool_count}
+            </span>
+          )}
+        </div>
+        {session.last_prompt && (
+          <div className="text-xs text-zinc-500 truncate italic">
+            {session.last_prompt}
+          </div>
+        )}
+        <div className="flex items-center gap-1.5 text-xs text-zinc-500">
+          {entrypointIcon(session)}
+          <span>{entrypointLabel}</span>
           {session.is_alive && (
             <>
               <span>&middot;</span>
