@@ -27,19 +27,32 @@ pub fn run() {
                         let server = Arc::new(server);
                         handle.manage(server.clone());
 
-                        // Install our PreToolUse hook into ~/.claude/settings.json
-                        // (claude hot-reloads this file, so it applies instantly).
-                        match permissions::global_settings::install_global_hook(
-                            server.port,
-                            &server.app_secret,
-                            &global_token,
-                        ) {
-                            Ok(_) => eprintln!(
-                                "[permissions] global hook installed in ~/.claude/settings.json"
-                            ),
-                            Err(e) => eprintln!(
-                                "[permissions] failed to install global hook: {}",
-                                e
+                        // Install our PreToolUse command-bridge hook into
+                        // ~/.claude/settings.json (claude hot-reloads this file,
+                        // so it applies instantly). The hook invokes the
+                        // `claude-deck-hook` bridge binary, which talks to our
+                        // unix socket — see permissions::server + the bridge.
+                        match permissions::global_settings::bridge_binary_path() {
+                            Some(bridge_bin) => {
+                                match permissions::global_settings::install_global_hook(
+                                    &bridge_bin,
+                                    &server.socket_path,
+                                    &server.app_secret,
+                                    &global_token,
+                                ) {
+                                    Ok(_) => eprintln!(
+                                        "[permissions] global command-bridge hook installed (bridge={}, socket={})",
+                                        bridge_bin.display(),
+                                        server.socket_path.display(),
+                                    ),
+                                    Err(e) => eprintln!(
+                                        "[permissions] failed to install global hook: {}",
+                                        e
+                                    ),
+                                }
+                            }
+                            None => eprintln!(
+                                "[permissions] could not locate claude-deck-hook bridge binary; hook not installed"
                             ),
                         }
 
@@ -63,25 +76,27 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building Claude Deck");
 
-    app.run(|_handle, event| {
+    app.run(|handle, event| {
         if let RunEvent::Exit = event {
-            // Best-effort cleanup so we don't leave a stale hook in settings.json
-            // that points at a server which is about to die.
+            // Best-effort cleanup on clean shutdown: remove our PreToolUse hook
+            // and the unix socket file.
             //
-            // KNOWN GAP (SIGKILL / crash): RunEvent::Exit only fires on a clean
-            // shutdown. If the app is `kill -9`'d or crashes, this never runs and
-            // the `"type":"http"` hook we injected stays in ~/.claude/settings.json
-            // pointing at a now-dead port. Because Claude blocks on that hook for
-            // EVERY session, it hangs all other Claude sessions' Bash/Edit/Write
-            // until manually removed (strip_our_hooks self-heals only on our next
-            // launch). Phase 1 of docs/PERMISSION-HUB-V2-PLAN.md fixes this
-            // structurally by replacing the live-port http hook with a
-            // short-lived `"type":"command"` bridge over a unix socket, where a
-            // stale socket path just fails connect() fast instead of hanging.
+            // NOTE (SIGKILL / crash): RunEvent::Exit only fires on a clean
+            // shutdown, so a `kill -9` still leaves our hook in
+            // ~/.claude/settings.json. Since Phase 1, that is HARMLESS: the hook
+            // is a `"type":"command"` bridge over a unix socket, so a stale entry
+            // just makes the bridge's connect() fail fast (and fail-open) instead
+            // of hanging every session like the old live-port http hook did.
+            // strip_our_hooks() still self-heals it on our next launch.
             if let Err(e) = permissions::global_settings::uninstall_global_hook() {
                 eprintln!("[permissions] failed to uninstall global hook on exit: {}", e);
             } else {
                 eprintln!("[permissions] global hook removed from ~/.claude/settings.json");
+            }
+
+            // Remove the socket file so the path is clean for the next launch.
+            if let Some(server) = handle.try_state::<Arc<permissions::PermissionServer>>() {
+                let _ = std::fs::remove_file(&server.socket_path);
             }
         }
     });
