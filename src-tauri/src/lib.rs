@@ -72,6 +72,8 @@ pub fn run() {
             commands::debug_info,
             commands::resolve_permission,
             commands::get_permission_server_info,
+            commands::list_scoped_allows,
+            commands::clear_scoped_allows,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Claude Deck");

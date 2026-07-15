@@ -77,6 +77,19 @@ struct RunRegistration {
 /// A permission waiting on a decision from the frontend.
 struct PendingRequest {
     responder: oneshot::Sender<PermissionDecision>,
+    /// Real Claude session id from the hook event — used to scope "allow session".
+    session_id: String,
+    /// Tool this request is for — "allow session" is scoped per (session, tool).
+    tool_name: String,
+    /// Run token that owns this request, so `unregister_run` can wake it.
+    run_token: String,
+}
+
+/// Build the scoped-allow key for a (session, tool) pair. "Allow session" grants
+/// this specific tool for this specific Claude session — never a machine-wide
+/// blanket allow (which is what the old `session:global:*` key silently did).
+fn scoped_allow_key(session_id: &str, tool_name: &str) -> String {
+    format!("session:{}:tool:{}", session_id, tool_name)
 }
 
 /// Shared state for the axum handlers.
@@ -184,37 +197,65 @@ impl PermissionServer {
         token
     }
 
-    /// Remove a run. Any pending requests for this run auto-deny.
+    /// Remove a run. Any pending requests owned by this run are woken with a
+    /// deny so the blocking bridge process returns immediately instead of
+    /// hanging until the 300s timeout (and its `oneshot` sender leaking).
     pub async fn unregister_run(&self, run_token: &str) {
         self.state.run_tokens.lock().await.remove(run_token);
-        // Auto-deny any orphaned pending requests
+
         let mut pending = self.state.pending.lock().await;
-        pending.retain(|_, _| true); // TODO: filter by run_token when we attach it
+        let orphaned: Vec<String> = pending
+            .iter()
+            .filter(|(_, req)| req.run_token == run_token)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in orphaned {
+            if let Some(req) = pending.remove(&id) {
+                let _ = req.responder.send(PermissionDecision::Deny);
+            }
+        }
     }
 
-    /// Frontend calls this to resolve a pending permission.
+    /// Frontend calls this to resolve a pending permission. The scoped-allow key
+    /// comes from the pending request itself (real Claude session id + tool),
+    /// NOT from the run token — so "allow session" grants exactly one tool for
+    /// one session, never a machine-wide blanket allow.
     pub async fn resolve(
         &self,
         request_id: &str,
         decision: PermissionDecision,
-        run_token: &str,
+        _run_token: &str,
     ) -> Result<(), String> {
-        // Record scoped allow if applicable
-        if decision == PermissionDecision::AllowSession {
-            if let Some(reg) = self.state.run_tokens.lock().await.get(run_token) {
-                let mut scoped = self.state.scoped_allows.lock().await;
-                // Key needs tool_name — we don't have it here; simplified v1 stores
-                // "session:<sid>:*" meaning allow everything for session.
-                scoped.insert(format!("session:{}:*", reg.internal_session_id));
-            }
-        }
-
         let mut pending = self.state.pending.lock().await;
         let req = pending
             .remove(request_id)
             .ok_or_else(|| format!("No pending request {}", request_id))?;
+
+        if decision == PermissionDecision::AllowSession {
+            let mut scoped = self.state.scoped_allows.lock().await;
+            scoped.insert(scoped_allow_key(&req.session_id, &req.tool_name));
+        }
+
         let _ = req.responder.send(decision);
         Ok(())
+    }
+
+    /// List currently active session-scoped allows (for the UI to display/revoke).
+    pub async fn list_scoped_allows(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.state.scoped_allows.lock().await.iter().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// Revoke a single scoped allow (or all, when `key` is None).
+    pub async fn clear_scoped_allows(&self, key: Option<&str>) {
+        let mut scoped = self.state.scoped_allows.lock().await;
+        match key {
+            Some(k) => {
+                scoped.remove(k);
+            }
+            None => scoped.clear(),
+        }
     }
 }
 
@@ -325,10 +366,12 @@ async fn evaluate(
         }
     }
 
-    // Fast path: scoped allow-session
+    // Fast path: scoped allow-session — keyed on the REAL Claude session id +
+    // tool, so a prior "allow session" only short-circuits the same tool in the
+    // same session (never every session on the machine).
     {
         let scoped = state.scoped_allows.lock().await;
-        if scoped.contains(&format!("session:{}:*", registration.internal_session_id)) {
+        if scoped.contains(&scoped_allow_key(&req.session_id, &req.tool_name)) {
             return Ok(HookOutcome::allow("Session-scoped allow"));
         }
     }
@@ -339,7 +382,12 @@ async fn evaluate(
 
     state.pending.lock().await.insert(
         request_id.clone(),
-        PendingRequest { responder: tx },
+        PendingRequest {
+            responder: tx,
+            session_id: req.session_id.clone(),
+            tool_name: req.tool_name.clone(),
+            run_token: token.to_string(),
+        },
     );
 
     let pending_payload = PendingPermission {
@@ -489,6 +537,26 @@ async fn handle_socket_conn(
     write_half.write_all(out.as_bytes()).await?;
     write_half.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scoped_allow_key;
+
+    #[test]
+    fn scoped_key_is_per_session_and_tool() {
+        // Two different sessions approving the same tool must NOT share a key,
+        // and the same session's other tools must NOT be covered. This guards
+        // the regression where a single "global:*" key allowed everything.
+        let a = scoped_allow_key("sess-A", "Bash");
+        let b = scoped_allow_key("sess-B", "Bash");
+        let c = scoped_allow_key("sess-A", "Write");
+        assert_ne!(a, b, "different sessions must have distinct keys");
+        assert_ne!(a, c, "different tools must have distinct keys");
+        assert_eq!(a, "session:sess-A:tool:Bash");
+        // No wildcard: the key must never be a blanket per-session allow.
+        assert!(!a.contains('*'));
+    }
 }
 
 /// Recursively redact sensitive fields before sending to the UI.
