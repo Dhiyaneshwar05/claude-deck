@@ -357,8 +357,47 @@ async fn evaluate(
         return Err(EvaluateError::WrongHookEvent);
     }
 
-    // Fast path: safe bash auto-approve
-    if req.tool_name == "Bash" {
+    // Fast path 1: honor the user's OWN Claude permission policy
+    // (~/.claude/settings.json + settings.local.json). This is authoritative —
+    // a matching allow/deny rule short-circuits without ever prompting, exactly
+    // as `claude` itself would. Only an `ask` outcome falls through to the human
+    // queue. Loaded per-call (stateless, like preloop) so live config edits and
+    // `settings.local.json` changes take effect immediately.
+    let policy = match crate::permissions::claude_policy::load_claude_permission_policy() {
+        Ok(p) => p,
+        Err(e) => {
+            // A broken/unreadable settings file must not brick tool calls:
+            // treat as no policy (everything escalates to `ask`) and log.
+            eprintln!("[permissions] failed to load Claude policy (treating as empty): {}", e);
+            crate::permissions::claude_policy::ClaudePermissionPolicy::default()
+        }
+    };
+    use crate::permissions::claude_policy::PolicyDecision;
+    match crate::permissions::claude_policy::evaluate_claude_permission_policy(
+        &policy,
+        &req.permission_mode,
+        &req.tool_name,
+        &req.tool_input,
+    ) {
+        PolicyDecision::Allow => {
+            return Ok(HookOutcome::allow("Allowed by your Claude settings"));
+        }
+        PolicyDecision::Deny => {
+            return Ok(HookOutcome::deny("Denied by your Claude settings"));
+        }
+        PolicyDecision::Ask => { /* fall through to the fast paths + human queue */ }
+    }
+
+    // Fast path 2: safe bash auto-approve. Secondary convenience for obviously
+    // read-only commands the user didn't explicitly list — but an explicit
+    // `ask` rule always wins, so this never overrides a deliberate "review this".
+    if req.tool_name == "Bash"
+        && !crate::permissions::claude_policy::has_explicit_ask_rule(
+            &policy,
+            &req.tool_name,
+            &req.tool_input,
+        )
+    {
         if let Some(cmd) = req.tool_input.get("command").and_then(|v| v.as_str()) {
             if crate::permissions::safe_bash::is_safe_bash_command(cmd) {
                 return Ok(HookOutcome::allow("Auto-approved: read-only command"));
