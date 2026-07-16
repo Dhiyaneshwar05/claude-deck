@@ -120,7 +120,7 @@ fn strip_our_hooks(mut settings: Value) -> Value {
 /// Paths are single-quoted to survive spaces in the socket / binary path.
 fn bridge_command(bridge_bin: &std::path::Path, socket_path: &std::path::Path, app_secret: &str, run_token: &str) -> String {
     format!(
-        "'{}' --socket '{}' --secret '{}' --token '{}' --fail-open",
+        "'{}' --socket '{}' --secret '{}' --token '{}' --fail-native",
         bridge_bin.display(),
         socket_path.display(),
         app_secret,

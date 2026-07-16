@@ -80,23 +80,18 @@ pub fn run() {
 
     app.run(|handle, event| {
         if let RunEvent::Exit = event {
-            // Best-effort cleanup on clean shutdown: remove our PreToolUse hook
-            // and the unix socket file.
+            // We deliberately LEAVE the hook installed in ~/.claude/settings.json
+            // on exit. Since Phase 1 the hook is a `"type":"command"` bridge, and
+            // since we run it with `--fail-native` the bridge emits NO decision
+            // when the app is down — Claude falls back to its own permission flow,
+            // exactly as if the hub weren't installed. Removing it on exit created
+            // a "restart blackout": every session silently reverted to native
+            // prompts while the app bounced, and a fresh install had to race the
+            // settings.json hot-reload. Leaving it means restarts are seamless and
+            // a stale hook is harmless. strip_our_hooks() on next launch still
+            // reconciles the socket/secret/token to the new run.
             //
-            // NOTE (SIGKILL / crash): RunEvent::Exit only fires on a clean
-            // shutdown, so a `kill -9` still leaves our hook in
-            // ~/.claude/settings.json. Since Phase 1, that is HARMLESS: the hook
-            // is a `"type":"command"` bridge over a unix socket, so a stale entry
-            // just makes the bridge's connect() fail fast (and fail-open) instead
-            // of hanging every session like the old live-port http hook did.
-            // strip_our_hooks() still self-heals it on our next launch.
-            if let Err(e) = permissions::global_settings::uninstall_global_hook() {
-                eprintln!("[permissions] failed to uninstall global hook on exit: {}", e);
-            } else {
-                eprintln!("[permissions] global hook removed from ~/.claude/settings.json");
-            }
-
-            // Remove the socket file so the path is clean for the next launch.
+            // Only clean up the socket file so the path is tidy for next launch.
             if let Some(server) = handle.try_state::<Arc<permissions::PermissionServer>>() {
                 let _ = std::fs::remove_file(&server.socket_path);
             }
