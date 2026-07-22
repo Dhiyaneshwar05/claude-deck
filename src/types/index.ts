@@ -88,6 +88,8 @@ export interface PendingPermission {
   tool_input: unknown;
   session_id: string;
   cwd: string;
+  /** Seconds from receipt until the backend auto-denies (drives the countdown). */
+  timeout_secs: number;
   /** Client-side: when we received the request, for elapsed-time display */
   received_at: number;
 }

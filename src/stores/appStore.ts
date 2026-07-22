@@ -57,6 +57,9 @@ interface AppState {
     requestId: string,
     decision: PermissionDecision,
   ) => Promise<void>;
+  /** Drop a request from the queue without an IPC call (e.g. it expired on the
+   * backend, so there is nothing left to resolve). */
+  removePermission: (requestId: string) => void;
   refreshScopedAllows: () => Promise<void>;
   revokeScopedAllow: (key?: string) => Promise<void>;
 }
@@ -179,6 +182,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         [perm.request_id]: perm,
       },
     })),
+
+  removePermission: (requestId) =>
+    set((state) => {
+      if (!state.pendingPermissions[requestId]) return {};
+      const next = { ...state.pendingPermissions };
+      delete next[requestId];
+      return { pendingPermissions: next };
+    }),
 
   decidePermission: async (requestId, decision) => {
     const perm = get().pendingPermissions[requestId];
