@@ -19,3 +19,7 @@ dist/
 .idea/
 .vscode/
 *.log
+
+# Private "shipped notes" — plain-language write-ups of each phase for my own
+# reference (interviews, explaining the work). Not part of the codebase.
+docs/shipped-notes/

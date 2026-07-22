@@ -13,6 +13,8 @@ import {
   sendPrompt,
   cancelSession as cancelSessionIpc,
   resolvePermission as resolvePermissionIpc,
+  listScopedAllows,
+  clearScopedAllows,
 } from "../lib/tauri";
 
 let msgCounter = 0;
@@ -35,6 +37,9 @@ interface AppState {
   // Pending permission requests (keyed by request_id)
   pendingPermissions: Record<string, PendingPermission>;
 
+  // Active session-scoped allows (e.g. "session:<id>:tool:<Tool>")
+  scopedAllows: string[];
+
   // Actions — discovery
   refreshSessions: () => Promise<void>;
   selectSession: (sessionId: string | null) => void;
@@ -52,6 +57,11 @@ interface AppState {
     requestId: string,
     decision: PermissionDecision,
   ) => Promise<void>;
+  /** Drop a request from the queue without an IPC call (e.g. it expired on the
+   * backend, so there is nothing left to resolve). */
+  removePermission: (requestId: string) => void;
+  refreshScopedAllows: () => Promise<void>;
+  revokeScopedAllow: (key?: string) => Promise<void>;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -61,6 +71,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeSessionId: null,
   hubSessions: {},
   pendingPermissions: {},
+  scopedAllows: [],
 
   refreshSessions: async () => {
     try {
@@ -172,6 +183,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       },
     })),
 
+  removePermission: (requestId) =>
+    set((state) => {
+      if (!state.pendingPermissions[requestId]) return {};
+      const next = { ...state.pendingPermissions };
+      delete next[requestId];
+      return { pendingPermissions: next };
+    }),
+
   decidePermission: async (requestId, decision) => {
     const perm = get().pendingPermissions[requestId];
     if (!perm) return;
@@ -183,12 +202,33 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
     try {
       await resolvePermissionIpc(requestId, perm.run_token, decision);
+      if (decision === "allow-session") {
+        await get().refreshScopedAllows();
+      }
     } catch (err) {
       console.error("Failed to resolve permission:", err);
       // Put it back so the user can retry
       set((state) => ({
         pendingPermissions: { ...state.pendingPermissions, [requestId]: perm },
       }));
+    }
+  },
+
+  refreshScopedAllows: async () => {
+    try {
+      const allows = await listScopedAllows();
+      set({ scopedAllows: allows });
+    } catch (err) {
+      console.error("Failed to list scoped allows:", err);
+    }
+  },
+
+  revokeScopedAllow: async (key) => {
+    try {
+      await clearScopedAllows(key);
+      await get().refreshScopedAllows();
+    } catch (err) {
+      console.error("Failed to revoke scoped allow:", err);
     }
   },
 

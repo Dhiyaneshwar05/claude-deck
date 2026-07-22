@@ -20,6 +20,24 @@ use serde_json::{json, Value};
 
 const MARKER: &str = "claude-deck";
 const URL_PREFIX: &str = "http://127.0.0.1:";
+/// Substring that identifies our command-bridge hook (Phase 1) for crash recovery.
+const BRIDGE_BIN: &str = "claude-deck-hook";
+
+/// Resolve the absolute path to the `claude-deck-hook` bridge binary. In dev it
+/// sits next to the main app binary (`target/debug/claude-deck-hook`); in a
+/// bundled release it's shipped alongside the app executable. We derive it from
+/// the current executable's directory.
+pub fn bridge_binary_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let candidate = dir.join(BRIDGE_BIN);
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        // Fall back to the plain name and let PATH resolve it (last resort).
+        Some(PathBuf::from(BRIDGE_BIN))
+    }
+}
 
 fn settings_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("settings.json"))
@@ -56,12 +74,19 @@ fn is_ours(hook_entry: &Value) -> bool {
         if is_marker {
             return true;
         }
-        // Fall-back: match local-loopback HTTP hooks (legacy crash recovery)
-        h.get("type").and_then(|t| t.as_str()) == Some("http")
+        // Fall-back: match legacy local-loopback HTTP hooks (pre-Phase-1 crash recovery)
+        let legacy_http = h.get("type").and_then(|t| t.as_str()) == Some("http")
             && h.get("url")
                 .and_then(|u| u.as_str())
                 .map(|u| u.starts_with(URL_PREFIX) && u.contains("/hook/pre-tool-use/"))
-                .unwrap_or(false)
+                .unwrap_or(false);
+        // Fall-back: match our command-bridge hook by its binary name (crash recovery)
+        let bridge_cmd = h.get("type").and_then(|t| t.as_str()) == Some("command")
+            && h.get("command")
+                .and_then(|c| c.as_str())
+                .map(|c| c.contains(BRIDGE_BIN))
+                .unwrap_or(false);
+        legacy_http || bridge_cmd
     })
 }
 
@@ -91,29 +116,44 @@ fn strip_our_hooks(mut settings: Value) -> Value {
     settings
 }
 
+/// Build the shell command string that Claude will invoke for the command hook.
+/// Paths are single-quoted to survive spaces in the socket / binary path.
+fn bridge_command(bridge_bin: &std::path::Path, socket_path: &std::path::Path, app_secret: &str, run_token: &str) -> String {
+    format!(
+        "'{}' --socket '{}' --secret '{}' --token '{}' --fail-native",
+        bridge_bin.display(),
+        socket_path.display(),
+        app_secret,
+        run_token,
+    )
+}
+
 /// Install our PreToolUse hook into `~/.claude/settings.json`.
 ///
-/// `server_port`, `app_secret`, and `run_token` are baked into the hook URL.
+/// Phase 1: a `"type":"command"` bridge over a unix socket. The bridge binary,
+/// socket path, app secret, and run token are baked into the command string.
 /// First strips any stale entries from prior crashes, then prepends ours.
+///
+/// Unlike the old http hook (which pointed at a live TCP port and hung every
+/// session when the app died), a stale command hook just fails connect() fast
+/// and fails open — the dangling-hook bug is structurally gone.
 pub fn install_global_hook(
-    server_port: u16,
+    bridge_bin: &std::path::Path,
+    socket_path: &std::path::Path,
     app_secret: &str,
     run_token: &str,
 ) -> std::io::Result<()> {
     let mut settings = strip_our_hooks(read_settings());
 
-    let url = format!(
-        "{}{}/hook/pre-tool-use/{}/{}",
-        URL_PREFIX, server_port, app_secret, run_token
-    );
+    let command = bridge_command(bridge_bin, socket_path, app_secret, run_token);
 
     let our_entry = json!({
         "matcher": "^(Bash|Edit|Write|MultiEdit|mcp__.*)$",
         "hooks": [
             {
-                "type": "http",
-                "url": url,
-                "timeout": 300,
+                "type": "command",
+                "command": command,
+                "timeout": 310,
                 MARKER: true
             }
         ]

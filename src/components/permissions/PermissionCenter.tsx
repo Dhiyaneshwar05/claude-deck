@@ -49,6 +49,20 @@ function elapsed(receivedAt: number, now: number): string {
   return `${mins}m ago`;
 }
 
+/** Seconds left before the backend auto-denies this request (0 if past due). */
+function secondsRemaining(perm: PendingPermission, now: number): number {
+  const deadline = perm.received_at + perm.timeout_secs * 1000;
+  return Math.max(0, Math.ceil((deadline - now) / 1000));
+}
+
+function formatRemaining(secs: number): string {
+  if (secs <= 0) return "expiring…";
+  if (secs < 60) return `${secs}s left`;
+  const mins = Math.floor(secs / 60);
+  const rem = secs % 60;
+  return rem ? `${mins}m ${rem}s left` : `${mins}m left`;
+}
+
 function PermissionRow({
   perm,
   now,
@@ -59,6 +73,8 @@ function PermissionRow({
   const decide = useAppStore((s) => s.decidePermission);
   const preview = formatToolInput(perm.tool_name, perm.tool_input);
   const allowSessionAvailable = perm.tool_name !== "Bash";
+  const remaining = secondsRemaining(perm, now);
+  const urgent = remaining <= 30;
 
   return (
     <div className="border-b border-zinc-800/60 last:border-b-0 p-4">
@@ -73,6 +89,14 @@ function PermissionRow({
             {elapsed(perm.received_at, now)}
           </span>
         </div>
+        <span
+          className={`text-[10px] font-medium tabular-nums ${
+            urgent ? "text-rose-400" : "text-zinc-500"
+          }`}
+          title="Auto-denies when the countdown ends"
+        >
+          {formatRemaining(remaining)}
+        </span>
       </div>
 
       <div className="flex items-center gap-1 text-[11px] text-zinc-500 font-mono mb-2 min-w-0">
@@ -119,26 +143,54 @@ function PermissionRow({
   );
 }
 
+function scopedAllowLabel(key: string): string {
+  // key shape: "session:<id>:tool:<Tool>"
+  const m = key.match(/^session:(.*):tool:(.*)$/);
+  if (!m) return key;
+  const sid = m[1].length > 8 ? `${m[1].slice(0, 8)}…` : m[1];
+  return `${m[2]} · ${sid}`;
+}
+
 export function PermissionCenter() {
   const pending = useAppStore((s) => s.pendingPermissions);
+  const scopedAllows = useAppStore((s) => s.scopedAllows);
+  const refreshScopedAllows = useAppStore((s) => s.refreshScopedAllows);
+  const revokeScopedAllow = useAppStore((s) => s.revokeScopedAllow);
+  const removePermission = useAppStore((s) => s.removePermission);
   const list = Object.values(pending).sort(
     (a, b) => a.received_at - b.received_at,
   );
   const count = list.length;
 
-  // DEBUG: log every render so we know the component is alive
-  console.log("[PermissionCenter] render, count =", count, "pending keys =", Object.keys(pending));
-
   const [open, setOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Tick "elapsed" labels every second while panel is open
+  // Tick every second while there are pending items (so countdowns advance and
+  // the auto-prune below runs) even when the panel is closed. Idle otherwise.
   useEffect(() => {
-    if (!open) return;
+    if (count === 0) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [open]);
+  }, [count]);
+
+  // Client-side safety net: if a card is past its deadline and the backend's
+  // `permission-expired` event never arrived (e.g. the app was closed during
+  // the timeout, or the emit was missed), prune it locally so it can't become a
+  // ghost. Small grace period past the deadline to prefer the backend signal.
+  useEffect(() => {
+    for (const perm of list) {
+      const deadline = perm.received_at + perm.timeout_secs * 1000;
+      if (now - deadline > 2000) {
+        removePermission(perm.request_id);
+      }
+    }
+  }, [now, list, removePermission]);
+
+  // Load active session-allows whenever the panel opens
+  useEffect(() => {
+    if (open) refreshScopedAllows();
+  }, [open, refreshScopedAllows]);
 
   // Auto-open when a new permission arrives and we currently have none open
   const prevCount = useRef(count);
@@ -238,6 +290,41 @@ export function PermissionCenter() {
               ))
             )}
           </div>
+
+          {scopedAllows.length > 0 && (
+            <div className="border-t border-zinc-800/80 px-4 py-3">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                  Active session allows ({scopedAllows.length})
+                </span>
+                <button
+                  onClick={() => revokeScopedAllow()}
+                  className="text-[10px] text-rose-400 hover:text-rose-300"
+                >
+                  Revoke all
+                </button>
+              </div>
+              <div className="flex flex-col gap-1 max-h-32 overflow-y-auto">
+                {scopedAllows.map((key) => (
+                  <div
+                    key={key}
+                    className="flex items-center justify-between gap-2 text-[11px] text-zinc-400 font-mono"
+                  >
+                    <span className="truncate" title={key}>
+                      {scopedAllowLabel(key)}
+                    </span>
+                    <button
+                      onClick={() => revokeScopedAllow(key)}
+                      className="shrink-0 text-zinc-600 hover:text-rose-400"
+                      title="Revoke this allow"
+                    >
+                      <X size={11} weight="bold" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

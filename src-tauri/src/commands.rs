@@ -116,3 +116,26 @@ pub async fn resolve_permission(
         .clone();
     server.resolve(&request_id, decision, &run_token).await
 }
+
+/// List active session-scoped allows so the UI can show/revoke them.
+#[tauri::command]
+pub async fn list_scoped_allows(app: AppHandle) -> Result<Vec<String>, String> {
+    let server = app
+        .try_state::<Arc<PermissionServer>>()
+        .ok_or("Permission server not ready")?
+        .inner()
+        .clone();
+    Ok(server.list_scoped_allows().await)
+}
+
+/// Revoke one scoped allow (by key) or all of them (key = None).
+#[tauri::command]
+pub async fn clear_scoped_allows(app: AppHandle, key: Option<String>) -> Result<(), String> {
+    let server = app
+        .try_state::<Arc<PermissionServer>>()
+        .ok_or("Permission server not ready")?
+        .inner()
+        .clone();
+    server.clear_scoped_allows(key.as_deref()).await;
+    Ok(())
+}

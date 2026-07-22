@@ -1,145 +1,62 @@
-# claude-deck
+# Claude Deck
 
-> Mission-control desktop app for managing **multiple Claude Code sessions** in one pane of glass. Spawn, monitor, and (soon) centrally approve permissions across every session you have running — Cursor, VS Code, terminal, or hub-native.
+> **One window for every Claude Code session on your machine — and one place to approve what they're all about to do.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8DB.svg)](https://tauri.app)
 [![React 19](https://img.shields.io/badge/React-19-61dafb.svg)](package.json)
 [![Rust](https://img.shields.io/badge/Rust-stable-dea584.svg)](src-tauri/Cargo.toml)
-[![Status: WIP](https://img.shields.io/badge/status-WIP_Phase_2-f59e0b.svg)](#current-status)
+[![Status: active](https://img.shields.io/badge/status-active-3fb950.svg)](#status)
 
-> **Heads up:** this is a work-in-progress personal project. Phase 1 (session discovery + dashboard) works end-to-end; Phase 2 (hub-spawned chat engine) is ~80% built but currently blocked on a macOS GUI env/stdout issue documented below. Reading honest engineering trade-offs is kind of the point — skip to [Current Status](#current-status) for the full picture.
+Claude Deck discovers every Claude Code session running on your Mac — in Cursor, VS Code, or a bare terminal — and shows them in one live dashboard. Its centerpiece is the **Permission Hub**: when *any* of those sessions is about to run a command, edit a file, or hit the network, the request is routed into a single approval queue instead of a prompt buried in whichever terminal spawned it.
 
 ---
 
-## Demo
-
-<!-- Capture screenshots / GIF per docs/CAPTURE_CHECKLIST.md and drop them in docs/images/ -->
+## The Permission Hub
 
 <p align="center">
-  <img src="docs/images/sidebar.png" alt="claude-deck sidebar showing multiple Claude sessions" width="720"/>
+  <img src="docs/images/permission-hub-full.png" alt="Claude Deck showing 16 live Claude Code sessions grouped by project in the sidebar, with the Permission Center routing pending Bash requests from multiple sessions into one approval queue" width="860"/>
 </p>
+
+Run five Claude sessions in parallel and the permission prompts become the bottleneck — each one blocks *its* terminal, and you're alt-tabbing across windows to find the one that's waiting on you. Claude Deck collapses all of them into a single queue:
+
+- **Every session, one queue.** Sessions spawned anywhere on the machine surface here — not just ones Claude Deck started.
+- **Enough context to actually decide.** Each request shows the tool, the exact command or file, the working directory, and which session it came from.
+- **It defers to *your* rules.** Claude Deck reads your own `~/.claude/settings.json` allow/deny/ask policy and only asks about the things you haven't already decided. It's an aid, not a hijacker — anything outside its policy falls straight back to Claude's native prompt.
+- **It never leaves a session hanging.** Requests you ignore auto-expire with a visible countdown, and if the app isn't reachable the hook fails through to Claude's normal flow in milliseconds — never a multi-minute freeze.
 
 <p align="center">
-  <img src="docs/images/chat-view.png" alt="claude-deck chat view rendering NDJSON events" width="720"/>
+  <img src="docs/images/permission-center-detail.png" alt="Close-up of the Permission Center showing individual pending requests with tool name, command, working directory, and Deny / Allow controls" width="560"/>
 </p>
 
-<!-- End-to-end screen recording: docs/demo.gif -->
+Alongside the hub, the sidebar is a live map of everything running: sessions grouped by project, model / token / uptime metadata pulled from disk, health polling, and status dots — plus the ability to spawn new hub-native sessions of your own.
 
 ---
 
-## Why I built this
+## How it works
 
-I run five-plus Claude Code sessions in parallel — in Cursor, VS Code terminals, raw zsh, sometimes all at once on the same refactor. The operational glue (remembering which session owns which branch, approving permissions twice per session, spotting when one hit a rate limit) was eating more time than the actual work.
+The whole thing hangs on one property of Claude Code:
 
-**claude-deck** started as a weekend answer: one window that knows about every Claude Code session on the machine, streams their output in real time, and (next phase) lets me approve permissions centrally via Claude's file-watched `settings.json` hook system. Along the way it's a showcase of Tauri 2, tokio-based process management, and a non-trivial NDJSON streaming UI.
+> **Claude Code hot-reloads `~/.claude/settings.json`.** Register a hook there and it applies to *every* session on the machine, immediately — including ones you didn't start.
 
----
-
-## Features
-
-### ✅ Working today (Phase 1)
-
-- **Session discovery** — scans `~/.claude/sessions/*.json` and `~/.claude/projects/*/*.jsonl` on disk; shows every session regardless of which client spawned it.
-- **Live sidebar** with project grouping, health polling every 3 s, token/uptime formatting, and animated status dots.
-- **Metadata enrichment** — surfaces model, cost, token counts, last activity from the raw session files.
-- **Cross-pane IPC** wired end-to-end: Rust commands return `Result<T, String>`, events stream back to the React layer via `app.emit`.
-
-### 🚧 Built but currently blocked (Phase 2 — ~80%)
-
-- **Process spawning** of `claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages` with a bespoke `build_spawn_env()` that merges parent env + login-shell env (`/bin/zsh -lc "env -0"`) + extra PATH entries — needed because macOS GUI apps don't inherit `.zshrc` vars.
-- **NDJSON normalizer** in `src-tauri/src/process/events.rs` that decodes `system`, `stream_event`, `result`, and `rate_limit_event` payloads into a typed `NormalizedEvent` enum.
-- **Chat UI** — `MessageBubble`, `ToolCallCard`, `InputBar`, `EmptyState`; RAF-batched text streaming via Zustand selectors.
-- **Blocker:** spawned sessions return a PID but no stdout ever flows. See [Current Status](#current-status) for the leading hypotheses.
-
-### 📋 Planned
-
-- **Phase 3 — Permission Hub** (most ambitious): a local HTTP server + a hook injected into `~/.claude/settings.json`. Because Claude Code file-watches that config, the hook applies to *every* session on the machine — hub-spawned or not. One central approval UI for permissions across Cursor, VS Code, and terminal Claude.
-- **Phase 4 — Agent Profiles + History** (SQLite, agent CRUD, searchable run log).
-- **Phase 5 — Polish** (cost dashboard, themes, keyboard shortcuts, signed `.dmg`).
-
-Full tracker: [docs/PHASES.md](docs/PHASES.md).
-
----
-
-## Tech stack
-
-| Layer | Tools |
-|---|---|
-| Desktop shell | Tauri 2 (Rust binary + WebView2 / WKWebView) |
-| Backend | Rust stable, tokio (`process`, `io-util`, `sync`, `rt`), serde, dirs, uuid |
-| Frontend | React 19, TypeScript 5.7, Tailwind CSS 4, Zustand 5, Framer Motion |
-| Build | Vite 6, `@tauri-apps/cli` 2, `@tailwindcss/vite` |
-| Streaming | NDJSON over child stdin/stdout, normalized into typed Rust enums, relayed to the UI via Tauri events |
-| Icons | @phosphor-icons/react |
-
----
-
-## Architecture
+So Claude Deck registers a **`command` hook**: a note that says "run this small program before any tool." That program (`claude-deck-hook`) is stateless — it starts fresh each call, hands the request to the app over a **private local socket**, waits for your verdict, prints it back, and exits.
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                           claude-deck (Tauri 2)                         │
-│                                                                         │
-│  ┌───────────────────────────┐        ┌────────────────────────────┐   │
-│  │   Rust backend            │◄──────►│   React 19 frontend        │   │
-│  │                           │        │                            │   │
-│  │  lib.rs   (commands)      │  IPC   │  Zustand store             │   │
-│  │  commands.rs              │◄──────►│  ├─ sessions                │   │
-│  │  ├─ list_sessions          │ (cmds +│  ├─ hubSessions             │   │
-│  │  ├─ create_session         │ events)│  └─ accumulated messages   │   │
-│  │  ├─ send_prompt            │        │                            │   │
-│  │  └─ cancel_session         │        │  Components                │   │
-│  │                           │        │  ├─ Sidebar / SessionList   │   │
-│  │  process/pool.rs          │        │  ├─ ChatView                │   │
-│  │  ├─ ProcessPool            │        │  ├─ MessageBubble           │   │
-│  │  ├─ build_spawn_env        │        │  ├─ ToolCallCard            │   │
-│  │  └─ stdin/stdout/stderr    │        │  └─ InputBar                │   │
-│  │                           │        │                            │   │
-│  │  process/events.rs        │        │  Hooks                     │   │
-│  │  └─ NormalizedEvent enum  │        │  ├─ useHealthPoll (3s)      │   │
-│  │                           │        │  └─ useSessionEvents (RAF)  │   │
-│  │  session/discovery.rs     │        └────────────────────────────┘   │
-│  │  └─ scans ~/.claude/*      │                                         │
-│  └───────────────────────────┘                                         │
-│                │                                                        │
-│                ▼                                                        │
-│   spawns: `claude -p --input-format stream-json --output-format        │
-│             stream-json --verbose --include-partial-messages`          │
-└────────────────────────────────────────────────────────────────────────┘
+  Claude Code            claude-deck-hook            Claude Deck
+  (any session)          (fresh process/call)        (the app)
+      │                        │                         │
+      │  tool about to run     │                         │
+      ├───────  stdin  ───────►│                         │
+      │                        │   unix domain socket    │
+      │                        ├────────────────────────►│  ┌─────────────┐
+      │                        │                         │  │  your call: │
+      │                        │                         │  │ Allow / Deny│
+      │                        │◄────────────────────────┤  └─────────────┘
+      │◄──────  stdout  ───────┤   {allow | deny | ask}  │
+      │  decision enforced     │                         │
 ```
 
-Deeper technical notes: [CLAUDE.md](CLAUDE.md) (verbose context for future AI sessions) and [docs/MVP-SPEC.md](docs/MVP-SPEC.md).
-
----
-
-## Current Status
-
-Phase 1 ships. Phase 2 is the interesting part — and where honesty matters for a portfolio repo.
-
-### What works
-
-- Session discovery, sidebar rendering, health polling, metadata enrichment.
-- Spawning a Claude process succeeds (valid PID, binary resolves via augmented PATH).
-- NDJSON parser is unit-complete for every event shape the protocol emits.
-- UI surfaces messages, tool calls, and system events correctly in dev fixtures.
-
-### What's blocked
-
-**Symptom:** hub-spawned Claude sessions return a PID but never stream stdout. UI sits at "Connecting…"; stderr is empty; no rate-limit event; no result.
-
-**Root cause under investigation.** Leading hypotheses (in order of likelihood):
-
-1. **`stdin.flush()` missing on the initial prompt** — follow-ups call `flush()`; the first write doesn't. Claude may be buffering waiting for a newline-flushed input.
-2. **`--allowedTools` flag format** — currently passed as a single comma-separated arg. Upstream Claude Code may want space-separated or repeated flags.
-3. **Env capture from the Tauri GUI context** — `/bin/zsh -lc "env -0"` works from a terminal; when run from Tauri's spawn context it may return a truncated env. A debug command that dumps what we actually captured is the next test.
-4. **Stderr races** — auth errors could arrive on stderr *before* any stdout, never surfacing because the UI only subscribes to stdout-derived events. Mitigation is straightforward once confirmed.
-
-Reference: [clui-cc](https://github.com/) (Electron Claude Desktop) uses a much simpler approach — capture only `PATH` via `/bin/zsh -lc "echo $PATH"`, keep parent `process.env` intact, no `env_clear()`. Worth porting if hypothesis 3 confirms.
-
-### Why ship this as-is
-
-Hiding known issues on a portfolio project is worse than documenting them. The architecture and tooling decisions — Tauri 2, tokio async, RAF-batched Zustand updates, NDJSON normalization — are sound and reviewable. The remaining work is a debugging exercise, not a rewrite.
+Why a *program over a socket* rather than the more obvious "point Claude at a web server"? That choice is the difference between a hub that quietly poisons every session on the machine when it crashes, and one that fails safe in ~12ms. The reasoning — and the rest of the design — is written up in [`docs/shipped-notes/`](docs/shipped-notes/).
 
 ---
 
@@ -151,7 +68,7 @@ Hiding known issues on a portfolio project is worse than documenting them. The a
 - [Rust stable](https://rustup.rs/) (`rustup default stable`)
 - Node 20+ and npm
 - Xcode Command Line Tools (`xcode-select --install`)
-- Claude Code CLI installed (`npm install -g @anthropic-ai/claude-code` or whichever channel you use)
+- Claude Code CLI installed (`npm install -g @anthropic-ai/claude-code`, or your channel of choice)
 
 ### Install & run
 
@@ -168,54 +85,43 @@ npm run tauri build
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
-> The local folder is still named `agent-hub/` on disk — renaming the working tree mid-stream would invalidate `target/` without benefit. The shipping product, bundle identifier, and crate are all `claude-deck`.
+On launch, Claude Deck writes exactly one `claude-deck` hook into your `settings.json` and removes it on a clean quit. Your own hooks are left untouched.
+
+> The working tree on disk is still named `agent-hub/` and the crate is `agent-hub` — renaming mid-stream would invalidate `target/` for no benefit. The shipping product, bundle identifier, and app are all **Claude Deck**.
 
 ---
 
-## Project layout
+## Tech stack
 
-```
-claude-deck/
-├── src/                         # React 19 frontend
-│   ├── stores/appStore.ts       # Zustand — sessions, messages, event handling
-│   ├── hooks/
-│   │   ├── useHealthPoll.ts     # 3s session discovery refresh
-│   │   └── useSessionEvents.ts  # Tauri event listener, RAF-batched chunks
-│   ├── components/
-│   │   ├── sidebar/             # Nav, live session count, project grouping
-│   │   ├── chat/                # ChatView + MessageBubble + ToolCallCard
-│   │   ├── input/               # InputBar with CWD picker
-│   │   └── shared/              # StatusDot, etc.
-│   └── lib/                     # tauri.ts invoke wrappers, formatters
-│
-├── src-tauri/                   # Rust backend
-│   └── src/
-│       ├── lib.rs               # App init, command registration
-│       ├── commands.rs          # list/create/send/cancel/debug_info
-│       ├── process/
-│       │   ├── pool.rs          # ProcessPool, build_spawn_env()
-│       │   └── events.rs        # NormalizedEvent + NDJSON parser
-│       └── session/
-│           ├── discovery.rs     # ~/.claude/* scanner
-│           └── types.rs         # Session / Metadata structs
-│
-├── docs/
-│   ├── MVP-SPEC.md              # Original MVP spec
-│   ├── PHASES.md                # Phase tracker with checklists
-│   ├── CAPTURE_CHECKLIST.md     # Screenshot/demo capture guide
-│   └── images/                  # Screenshots referenced in README
-│
-├── CLAUDE.md                    # Verbose context for Claude Code sessions
-├── README.md
-├── LICENSE                      # Apache 2.0
-└── package.json
-```
+| Layer | Tools |
+|---|---|
+| Desktop shell | Tauri 2 (Rust binary + WKWebView) |
+| Backend | Rust stable, tokio, axum, serde, uuid |
+| Frontend | React 19, TypeScript 5.7, Tailwind CSS 4, Zustand 5, Framer Motion |
+| Build | Vite 6, `@tauri-apps/cli` 2 |
+| Hook bridge | Standalone `claude-deck-hook` binary ↔ app over a unix domain socket |
+| Icons | @phosphor-icons/react |
+
+---
+
+## Status
+
+Actively developed. Shipped and in daily use:
+
+- **Session discovery + live dashboard** — scans `~/.claude` on disk, surfaces every session regardless of which client spawned it, with project grouping, health polling, and metadata enrichment.
+- **Permission Hub** — the command-bridge hook, the central approval queue, a policy engine that honors your own `settings.json`, fail-to-native safety, and auto-expiry of stale requests.
+
+Open work is tracked in [GitHub Issues](../../issues) and the phase tracker at [`docs/PHASES.md`](docs/PHASES.md). A screen recording of the hub in action is coming — see [`docs/CAPTURE_CHECKLIST.md`](docs/CAPTURE_CHECKLIST.md).
+
+<!-- TODO(demo): embed screen recording here — docs/demo.gif or a hosted video link -->
 
 ---
 
 ## Contributing
 
-This is a personal project, but bug reports and design-level feedback are welcome via issues. If you've wrestled with the same macOS GUI / login-shell env-capture problem for Tauri, I'd love to compare notes.
+Contributions are welcome — the issue tracker has a set of scoped, labeled tasks, including [`good first issue`](../../issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)s to get started with. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for setup, branch/PR conventions, and how to claim an issue.
+
+Deeper technical context lives in [CLAUDE.md](CLAUDE.md) and [`docs/shipped-notes/`](docs/shipped-notes/).
 
 ---
 
