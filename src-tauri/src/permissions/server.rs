@@ -64,6 +64,19 @@ pub struct PendingPermission {
     pub tool_input: serde_json::Value,
     pub session_id: String,
     pub cwd: String,
+    /// Seconds until the backend auto-denies this request. The frontend uses it
+    /// to show a live countdown so a request never sits "pending" forever in the
+    /// UI while the backend has silently timed it out.
+    pub timeout_secs: u64,
+}
+
+/// Emitted to the frontend when a pending request is resolved without a UI
+/// click — either it hit the backend timeout, or its run was unregistered.
+/// The frontend removes the matching card so it can't become a ghost.
+#[derive(Debug, Clone, Serialize)]
+pub struct PermissionExpired {
+    pub request_id: String,
+    pub reason: String,
 }
 
 /// Per-run registration created when we spawn a claude process.
@@ -212,6 +225,17 @@ impl PermissionServer {
         for id in orphaned {
             if let Some(req) = pending.remove(&id) {
                 let _ = req.responder.send(PermissionDecision::Deny);
+                // Clear the card in the UI too — the run is gone, so this
+                // request can never be resolved by a click.
+                let expired = PermissionExpired {
+                    request_id: id.clone(),
+                    reason: "Session ended".to_string(),
+                };
+                let _ = self.state.app_handle.emit("permission-expired", &expired);
+                let _ = self
+                    .state
+                    .app_handle
+                    .emit_to("main", "permission-expired", &expired);
             }
         }
     }
@@ -437,6 +461,7 @@ async fn evaluate(
         tool_input: mask_sensitive(req.tool_input.clone()),
         session_id: req.session_id.clone(),
         cwd: req.cwd.clone(),
+        timeout_secs: PERMISSION_TIMEOUT_SECS,
     };
 
     eprintln!(
@@ -461,6 +486,14 @@ async fn evaluate(
         Ok(Ok(d)) => d,
         _ => {
             state.pending.lock().await.remove(&request_id);
+            // Tell the frontend so the card doesn't linger as a ghost the user
+            // can never resolve (its request_id is gone from the backend now).
+            let expired = PermissionExpired {
+                request_id: request_id.clone(),
+                reason: "Timed out after 5 minutes".to_string(),
+            };
+            let _ = state.app_handle.emit("permission-expired", &expired);
+            let _ = state.app_handle.emit_to("main", "permission-expired", &expired);
             return Ok(HookOutcome::deny("Permission timed out after 5 minutes"));
         }
     };
