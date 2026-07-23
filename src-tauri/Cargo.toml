@@ -2,6 +2,9 @@
 name = "agent-hub"
 version = "0.1.0"
 edition = "2021"
+# Two bin targets exist (the app + the claude-deck-hook bridge); tell `cargo run`
+# (invoked by `tauri dev`) to launch the app by default.
+default-run = "agent-hub"
 
 [lib]
 name = "agent_hub_lib"
@@ -10,6 +13,12 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [[bin]]
 name = "agent-hub"
 path = "src/main.rs"
+
+# Stateless PreToolUse command-bridge hook (Phase 1). Kept dependency-light so
+# it links only std + serde_json, not the whole Tauri app.
+[[bin]]
+name = "claude-deck-hook"
+path = "src/bin/claude-deck-hook.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

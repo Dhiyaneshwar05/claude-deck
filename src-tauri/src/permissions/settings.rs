@@ -1,17 +1,20 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-/// Write a per-run Claude settings file containing an HTTP PreToolUse hook.
+/// Write a per-run Claude settings file containing a command-bridge PreToolUse hook.
 /// Returns the absolute path to the file so the caller can pass `--settings <path>` to claude.
 ///
-/// Matches clui-cc's scheme (see permissions research):
 ///   $TMPDIR/claude-deck-hook-config/claude-deck-hook-<runToken>.json
 ///   dir mode 0o700, file mode 0o600
+///
+/// Phase 1: emits the same `"type":"command"` bridge form as the global hook so
+/// hub-spawned sessions never leave a live-port hook that can hang on crash.
 pub fn write_hook_settings_file(
     run_token: &str,
-    server_port: u16,
+    bridge_bin: &Path,
+    socket_path: &Path,
     app_secret: &str,
 ) -> std::io::Result<PathBuf> {
     let tmp = std::env::temp_dir();
@@ -24,12 +27,18 @@ pub fn write_hook_settings_file(
     }
 
     let path = dir.join(format!("claude-deck-hook-{}.json", run_token));
-    let url = format!(
-        "http://127.0.0.1:{}/hook/pre-tool-use/{}/{}",
-        server_port, app_secret, run_token
+    // --fail-native: if the app is unreachable, emit NO decision so Claude falls
+    // back to its own permission prompt — never silently allow (fail-open) a tool
+    // call that could be destructive. This matches the global hook installer.
+    let command = format!(
+        "'{}' --socket '{}' --secret '{}' --token '{}' --fail-native",
+        bridge_bin.display(),
+        socket_path.display(),
+        app_secret,
+        run_token,
     );
 
-    // Matcher covers the tools that actually request permission (matches clui-cc).
+    // Matcher covers the tools that actually request permission.
     // Read/Glob/Grep/WebSearch etc. bypass the hook via --allowedTools.
     let body = json!({
         "hooks": {
@@ -38,9 +47,12 @@ pub fn write_hook_settings_file(
                     "matcher": "^(Bash|Edit|Write|MultiEdit|mcp__.*)$",
                     "hooks": [
                         {
-                            "type": "http",
-                            "url": url,
-                            "timeout": 300
+                            "type": "command",
+                            "command": command,
+                            // 310s: just above the app's 300s decision timeout
+                            // (PERMISSION_TIMEOUT_SECS) so the app times out
+                            // first; Claude's hard kill is only a backstop.
+                            "timeout": 310
                         }
                     ]
                 }

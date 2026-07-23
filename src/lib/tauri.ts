@@ -52,3 +52,11 @@ export async function getPermissionServerInfo(): Promise<{
 } | null> {
   return invoke("get_permission_server_info");
 }
+
+export async function listScopedAllows(): Promise<string[]> {
+  return invoke<string[]>("list_scoped_allows");
+}
+
+export async function clearScopedAllows(key?: string): Promise<void> {
+  return invoke("clear_scoped_allows", { key: key ?? null });
+}

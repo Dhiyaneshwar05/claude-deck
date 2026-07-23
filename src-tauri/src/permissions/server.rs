@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,11 +18,14 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
 const PERMISSION_TIMEOUT_SECS: u64 = 300;
 const MAX_BODY_BYTES: usize = 1_048_576;
+/// Cap a single socket request line so a misbehaving bridge can't OOM us.
+const MAX_SOCKET_LINE_BYTES: u64 = MAX_BODY_BYTES as u64;
 
 /// Request payload Claude Code sends to our hook endpoint.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -73,6 +77,19 @@ struct RunRegistration {
 /// A permission waiting on a decision from the frontend.
 struct PendingRequest {
     responder: oneshot::Sender<PermissionDecision>,
+    /// Real Claude session id from the hook event — used to scope "allow session".
+    session_id: String,
+    /// Tool this request is for — "allow session" is scoped per (session, tool).
+    tool_name: String,
+    /// Run token that owns this request, so `unregister_run` can wake it.
+    run_token: String,
+}
+
+/// Build the scoped-allow key for a (session, tool) pair. "Allow session" grants
+/// this specific tool for this specific Claude session — never a machine-wide
+/// blanket allow (which is what the old `session:global:*` key silently did).
+fn scoped_allow_key(session_id: &str, tool_name: &str) -> String {
+    format!("session:{}:tool:{}", session_id, tool_name)
 }
 
 /// Shared state for the axum handlers.
@@ -86,10 +103,30 @@ struct ServerState {
     app_handle: AppHandle,
 }
 
+/// Normalized result of evaluating a single tool-permission request. The
+/// transport layer (HTTP handler or unix-socket handler) renders this into the
+/// wire format its caller expects.
+#[derive(Debug, Clone)]
+pub struct HookOutcome {
+    pub allow: bool,
+    pub reason: String,
+}
+
+impl HookOutcome {
+    fn allow(reason: impl Into<String>) -> Self {
+        HookOutcome { allow: true, reason: reason.into() }
+    }
+    fn deny(reason: impl Into<String>) -> Self {
+        HookOutcome { allow: false, reason: reason.into() }
+    }
+}
+
 /// Top-level permission server. Owned by Tauri state.
 pub struct PermissionServer {
     pub app_secret: String,
     pub port: u16,
+    /// Absolute path to the unix domain socket the command-bridge hook connects to.
+    pub socket_path: PathBuf,
     state: ServerState,
 }
 
@@ -130,9 +167,19 @@ impl PermissionServer {
             let _ = axum::serve(listener, app).await;
         });
 
+        // Start the unix-socket listener for the command-bridge hook. This is the
+        // Phase-1 transport that replaces the live-TCP-port http hook: a stale
+        // socket path just makes the bridge's connect() fail fast instead of
+        // hanging every Claude session (see docs/PERMISSION-HUB-V2-PLAN.md).
+        let socket_path = default_socket_path();
+        if let Err(e) = spawn_socket_listener(state.clone(), &socket_path).await {
+            eprintln!("[permissions] failed to start unix socket listener: {}", e);
+        }
+
         Ok(Self {
             app_secret,
             port: bound_port,
+            socket_path,
             state,
         })
     }
@@ -150,37 +197,65 @@ impl PermissionServer {
         token
     }
 
-    /// Remove a run. Any pending requests for this run auto-deny.
+    /// Remove a run. Any pending requests owned by this run are woken with a
+    /// deny so the blocking bridge process returns immediately instead of
+    /// hanging until the 300s timeout (and its `oneshot` sender leaking).
     pub async fn unregister_run(&self, run_token: &str) {
         self.state.run_tokens.lock().await.remove(run_token);
-        // Auto-deny any orphaned pending requests
+
         let mut pending = self.state.pending.lock().await;
-        pending.retain(|_, _| true); // TODO: filter by run_token when we attach it
+        let orphaned: Vec<String> = pending
+            .iter()
+            .filter(|(_, req)| req.run_token == run_token)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in orphaned {
+            if let Some(req) = pending.remove(&id) {
+                let _ = req.responder.send(PermissionDecision::Deny);
+            }
+        }
     }
 
-    /// Frontend calls this to resolve a pending permission.
+    /// Frontend calls this to resolve a pending permission. The scoped-allow key
+    /// comes from the pending request itself (real Claude session id + tool),
+    /// NOT from the run token — so "allow session" grants exactly one tool for
+    /// one session, never a machine-wide blanket allow.
     pub async fn resolve(
         &self,
         request_id: &str,
         decision: PermissionDecision,
-        run_token: &str,
+        _run_token: &str,
     ) -> Result<(), String> {
-        // Record scoped allow if applicable
-        if decision == PermissionDecision::AllowSession {
-            if let Some(reg) = self.state.run_tokens.lock().await.get(run_token) {
-                let mut scoped = self.state.scoped_allows.lock().await;
-                // Key needs tool_name — we don't have it here; simplified v1 stores
-                // "session:<sid>:*" meaning allow everything for session.
-                scoped.insert(format!("session:{}:*", reg.internal_session_id));
-            }
-        }
-
         let mut pending = self.state.pending.lock().await;
         let req = pending
             .remove(request_id)
             .ok_or_else(|| format!("No pending request {}", request_id))?;
+
+        if decision == PermissionDecision::AllowSession {
+            let mut scoped = self.state.scoped_allows.lock().await;
+            scoped.insert(scoped_allow_key(&req.session_id, &req.tool_name));
+        }
+
         let _ = req.responder.send(decision);
         Ok(())
+    }
+
+    /// List currently active session-scoped allows (for the UI to display/revoke).
+    pub async fn list_scoped_allows(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.state.scoped_allows.lock().await.iter().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// Revoke a single scoped allow (or all, when `key` is None).
+    pub async fn clear_scoped_allows(&self, key: Option<&str>) {
+        let mut scoped = self.state.scoped_allows.lock().await;
+        match key {
+            Some(k) => {
+                scoped.remove(k);
+            }
+            None => scoped.clear(),
+        }
     }
 }
 
@@ -237,15 +312,6 @@ async fn handle_pre_tool_use(
         return (StatusCode::FORBIDDEN, Json(deny_response("Invalid secret"))).into_response();
     }
 
-    let registration = {
-        let map = state.run_tokens.lock().await;
-        map.get(&token).cloned()
-    };
-    let registration = match registration {
-        Some(r) => r,
-        None => return (StatusCode::FORBIDDEN, Json(deny_response("Unknown run token"))).into_response(),
-    };
-
     let req: HookToolRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
@@ -253,24 +319,67 @@ async fn handle_pre_tool_use(
         }
     };
 
+    match evaluate(&state, &token, req).await {
+        Ok(outcome) if outcome.allow => {
+            (StatusCode::OK, Json(allow_response(outcome.reason))).into_response()
+        }
+        Ok(outcome) => (StatusCode::OK, Json(deny_response(outcome.reason))).into_response(),
+        Err(EvaluateError::UnknownRunToken) => {
+            (StatusCode::FORBIDDEN, Json(deny_response("Unknown run token"))).into_response()
+        }
+        Err(EvaluateError::WrongHookEvent) => {
+            (StatusCode::BAD_REQUEST, Json(deny_response("Wrong hook event"))).into_response()
+        }
+    }
+}
+
+/// Why the shared decision core could not produce an allow/deny outcome.
+enum EvaluateError {
+    UnknownRunToken,
+    WrongHookEvent,
+}
+
+/// Shared decision core used by every transport (HTTP handler + unix-socket
+/// bridge). Applies the run-token check, fast paths, then emits to the UI and
+/// blocks for a human decision (or times out → deny).
+async fn evaluate(
+    state: &ServerState,
+    token: &str,
+    req: HookToolRequest,
+) -> Result<HookOutcome, EvaluateError> {
+    let registration = {
+        let map = state.run_tokens.lock().await;
+        map.get(token).cloned()
+    };
+    let registration = registration.ok_or(EvaluateError::UnknownRunToken)?;
+
     if req.hook_event_name != "PreToolUse" {
-        return (StatusCode::BAD_REQUEST, Json(deny_response("Wrong hook event"))).into_response();
+        return Err(EvaluateError::WrongHookEvent);
     }
 
-    // Fast path: safe bash auto-approve
+    // Fast path: safe bash auto-approve. Every auto-approve is logged with the
+    // exact command so any silent approval is traceable after the fact (this is
+    // the ONLY path that runs a tool without a human decision or an explicit
+    // user policy — see the audit note in evaluate()'s callers).
     if req.tool_name == "Bash" {
         if let Some(cmd) = req.tool_input.get("command").and_then(|v| v.as_str()) {
             if crate::permissions::safe_bash::is_safe_bash_command(cmd) {
-                return (StatusCode::OK, Json(allow_response("Auto-approved: read-only command"))).into_response();
+                eprintln!(
+                    "[permissions][AUDIT] auto-approved read-only bash (session={}): {}",
+                    req.session_id, cmd
+                );
+                return Ok(HookOutcome::allow("Auto-approved: read-only command"));
             }
         }
     }
 
-    // Fast path: scoped allow-session
+    // Fast path: scoped allow-session — keyed on the REAL Claude session id +
+    // tool, so a prior "allow session" only short-circuits the same tool in the
+    // same session (never every session on the machine).
     {
         let scoped = state.scoped_allows.lock().await;
-        if scoped.contains(&format!("session:{}:*", registration.internal_session_id)) {
-            return (StatusCode::OK, Json(allow_response("Session-scoped allow"))).into_response();
+        if scoped.contains(&scoped_allow_key(&req.session_id, &req.tool_name)) {
+            return Ok(HookOutcome::allow("Session-scoped allow"));
         }
     }
 
@@ -280,12 +389,17 @@ async fn handle_pre_tool_use(
 
     state.pending.lock().await.insert(
         request_id.clone(),
-        PendingRequest { responder: tx },
+        PendingRequest {
+            responder: tx,
+            session_id: req.session_id.clone(),
+            tool_name: req.tool_name.clone(),
+            run_token: token.to_string(),
+        },
     );
 
     let pending_payload = PendingPermission {
         request_id: request_id.clone(),
-        run_token: token.clone(),
+        run_token: token.to_string(),
         tab_id: registration.tab_id.clone(),
         tool_name: req.tool_name.clone(),
         tool_input: mask_sensitive(req.tool_input.clone()),
@@ -303,7 +417,6 @@ async fn handle_pre_tool_use(
         Err(e) => eprintln!("[permissions] emit (app) FAILED: {}", e),
     }
     // Also emit directly to the main window (more reliable from background tokio tasks)
-    use tauri::Emitter;
     match state
         .app_handle
         .emit_to("main", "permission-request", &pending_payload)
@@ -311,27 +424,145 @@ async fn handle_pre_tool_use(
         Ok(_) => eprintln!("[permissions] emit_to(main) succeeded"),
         Err(e) => eprintln!("[permissions] emit_to(main) FAILED: {}", e),
     }
-    // List existing webviews for diagnostics
-    use tauri::Manager;
-    let labels: Vec<String> = state
-        .app_handle
-        .webview_windows()
-        .keys()
-        .cloned()
-        .collect();
-    eprintln!("[permissions] available webview windows: {:?}", labels);
 
     let decision = match tokio::time::timeout(Duration::from_secs(PERMISSION_TIMEOUT_SECS), rx).await {
         Ok(Ok(d)) => d,
         _ => {
             state.pending.lock().await.remove(&request_id);
-            return (StatusCode::OK, Json(deny_response("Permission timed out after 5 minutes"))).into_response();
+            return Ok(HookOutcome::deny("Permission timed out after 5 minutes"));
         }
     };
 
     match decision {
-        PermissionDecision::Deny => (StatusCode::OK, Json(deny_response("User denied"))).into_response(),
-        _ => (StatusCode::OK, Json(allow_response("User approved"))).into_response(),
+        PermissionDecision::Deny => Ok(HookOutcome::deny("User denied")),
+        _ => Ok(HookOutcome::allow("User approved")),
+    }
+}
+
+// ── Unix-socket transport (Phase 1 command bridge) ───────────
+
+/// Compute the default socket path: `$TMPDIR/claude-deck/perm.sock`.
+pub fn default_socket_path() -> PathBuf {
+    std::env::temp_dir().join("claude-deck").join("perm.sock")
+}
+
+/// Line-delimited JSON request the `claude-deck-hook` bridge sends over the
+/// socket. Carries the app secret + run token (same auth as the HTTP URL path)
+/// plus the raw Claude PreToolUse event.
+#[derive(Deserialize)]
+struct SocketRequest {
+    secret: String,
+    token: String,
+    event: HookToolRequest,
+}
+
+/// Line-delimited JSON response we send back to the bridge.
+#[derive(Serialize)]
+struct SocketResponse {
+    allow: bool,
+    reason: String,
+}
+
+/// Bind the unix domain socket and accept bridge connections. Removes any stale
+/// socket file first (a leftover path is harmless — connect just fails — but we
+/// can't bind over an existing file).
+async fn spawn_socket_listener(state: ServerState, socket_path: &PathBuf) -> std::io::Result<()> {
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    // A previous run may have left the socket file behind.
+    let _ = std::fs::remove_file(socket_path);
+
+    let listener = tokio::net::UnixListener::bind(socket_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600));
+    }
+    eprintln!("[permissions] unix socket listening at {}", socket_path.display());
+
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _addr)) => {
+                    let state = state.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_socket_conn(state, stream).await {
+                            eprintln!("[permissions] socket conn error: {}", e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[permissions] socket accept error: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Handle one bridge connection: read a single JSON request line, run the
+/// shared decision core, write a single JSON response line.
+async fn handle_socket_conn(
+    state: ServerState,
+    stream: tokio::net::UnixStream,
+) -> std::io::Result<()> {
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = BufReader::new(read_half.take(MAX_SOCKET_LINE_BYTES));
+    let mut line = String::new();
+    let n = reader.read_line(&mut line).await?;
+    if n == 0 {
+        return Ok(());
+    }
+
+    let resp = match serde_json::from_str::<SocketRequest>(&line) {
+        Ok(req) if req.secret != state.app_secret => {
+            SocketResponse { allow: false, reason: "Invalid secret".into() }
+        }
+        Ok(req) => match evaluate(&state, &req.token, req.event).await {
+            Ok(outcome) => SocketResponse { allow: outcome.allow, reason: outcome.reason },
+            Err(EvaluateError::UnknownRunToken) => {
+                SocketResponse { allow: false, reason: "Unknown run token".into() }
+            }
+            Err(EvaluateError::WrongHookEvent) => {
+                SocketResponse { allow: false, reason: "Wrong hook event".into() }
+            }
+        },
+        Err(e) => SocketResponse { allow: false, reason: format!("Bad JSON: {}", e) },
+    };
+
+    let mut out = serde_json::to_string(&resp).unwrap_or_else(|_| {
+        "{\"allow\":false,\"reason\":\"encode error\"}".to_string()
+    });
+    out.push('\n');
+    write_half.write_all(out.as_bytes()).await?;
+    write_half.flush().await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scoped_allow_key;
+
+    #[test]
+    fn scoped_key_is_per_session_and_tool() {
+        // Two different sessions approving the same tool must NOT share a key,
+        // and the same session's other tools must NOT be covered. This guards
+        // the regression where a single "global:*" key allowed everything.
+        let a = scoped_allow_key("sess-A", "Bash");
+        let b = scoped_allow_key("sess-B", "Bash");
+        let c = scoped_allow_key("sess-A", "Write");
+        assert_ne!(a, b, "different sessions must have distinct keys");
+        assert_ne!(a, c, "different tools must have distinct keys");
+        assert_eq!(a, "session:sess-A:tool:Bash");
+        // No wildcard: the key must never be a blanket per-session allow.
+        assert!(!a.contains('*'));
     }
 }
 
