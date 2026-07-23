@@ -19,6 +19,12 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 
 const MARKER: &str = "claude-deck";
+/// LEGACY, crash-recovery only. The Phase-1 command bridge uses a UNIX DOMAIN
+/// SOCKET, not a TCP port — there is no port to pick, occupy, or surface in
+/// settings. This prefix exists solely so `is_ours()` can recognize and strip
+/// stale `"type":"http"` hooks left over from the pre-Phase-1 baseline (commit
+/// 983a331), which DID point at a live loopback port. New installs never write
+/// an http hook.
 const URL_PREFIX: &str = "http://127.0.0.1:";
 /// Substring that identifies our command-bridge hook (Phase 1) for crash recovery.
 const BRIDGE_BIN: &str = "claude-deck-hook";
@@ -64,6 +70,17 @@ fn write_settings(value: &Value) -> std::io::Result<()> {
 }
 
 /// True if the given hook entry is one we (or a prior crash of us) installed.
+///
+/// Three ways an entry can be recognized as ours, in priority order:
+///   1. The explicit `"claude-deck": true` MARKER — every hook we write today
+///      carries it, so this is the normal path.
+///   2. LEGACY `"type":"http"` hook pointing at `http://127.0.0.1:<port>/hook/…`
+///      — the pre-Phase-1 baseline (commit 983a331) before the unix-socket
+///      bridge. "Legacy" = written by an older build; new installs never emit it.
+///   3. A `"type":"command"` hook whose command references the `claude-deck-hook`
+///      binary — covers a Phase-1 crash where we died before writing the marker.
+/// Paths 2 and 3 exist purely so a stale entry from a crashed/older run gets
+/// stripped and replaced on next start.
 fn is_ours(hook_entry: &Value) -> bool {
     let hooks = match hook_entry.get("hooks").and_then(|v| v.as_array()) {
         Some(arr) => arr,
@@ -153,6 +170,11 @@ pub fn install_global_hook(
             {
                 "type": "command",
                 "command": command,
+                // Claude kills the hook process after this many seconds. Set to
+                // 310 — deliberately just above the app's own 300s decision
+                // timeout (PERMISSION_TIMEOUT_SECS) — so the app always times out
+                // first and returns a clean decision; Claude's hard kill is only
+                // a last-resort backstop, never the normal path.
                 "timeout": 310,
                 MARKER: true
             }

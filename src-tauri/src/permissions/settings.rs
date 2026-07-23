@@ -49,6 +49,9 @@ pub fn write_hook_settings_file(
                         {
                             "type": "command",
                             "command": command,
+                            // 310s: just above the app's 300s decision timeout
+                            // (PERMISSION_TIMEOUT_SECS) so the app times out
+                            // first; Claude's hard kill is only a backstop.
                             "timeout": 310
                         }
                     ]
