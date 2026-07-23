@@ -27,8 +27,11 @@ pub fn write_hook_settings_file(
     }
 
     let path = dir.join(format!("claude-deck-hook-{}.json", run_token));
+    // --fail-native: if the app is unreachable, emit NO decision so Claude falls
+    // back to its own permission prompt — never silently allow (fail-open) a tool
+    // call that could be destructive. This matches the global hook installer.
     let command = format!(
-        "'{}' --socket '{}' --secret '{}' --token '{}' --fail-open",
+        "'{}' --socket '{}' --secret '{}' --token '{}' --fail-native",
         bridge_bin.display(),
         socket_path.display(),
         app_secret,

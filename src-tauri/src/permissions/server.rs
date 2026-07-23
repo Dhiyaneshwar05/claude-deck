@@ -357,10 +357,17 @@ async fn evaluate(
         return Err(EvaluateError::WrongHookEvent);
     }
 
-    // Fast path: safe bash auto-approve
+    // Fast path: safe bash auto-approve. Every auto-approve is logged with the
+    // exact command so any silent approval is traceable after the fact (this is
+    // the ONLY path that runs a tool without a human decision or an explicit
+    // user policy — see the audit note in evaluate()'s callers).
     if req.tool_name == "Bash" {
         if let Some(cmd) = req.tool_input.get("command").and_then(|v| v.as_str()) {
             if crate::permissions::safe_bash::is_safe_bash_command(cmd) {
+                eprintln!(
+                    "[permissions][AUDIT] auto-approved read-only bash (session={}): {}",
+                    req.session_id, cmd
+                );
                 return Ok(HookOutcome::allow("Auto-approved: read-only command"));
             }
         }
