@@ -123,6 +123,11 @@ fn run() -> Result<(), (FailMode, String)> {
         .read_to_string(&mut raw)
         .map_err(|e| (args.fail_mode, format!("failed to read stdin: {}", e)))?;
 
+    // "Invalid hook event JSON" = stdin isn't the shape Claude's PreToolUse
+    // contract promises. Examples: truncated/garbled JSON (`{"tool_name":`), a
+    // non-object (`"hello"` / `42`), or otherwise unparseable input. Empty stdin
+    // is NOT an error — we treat it as `{}`. On a real parse failure we don't
+    // guess: we fall back to the configured fail mode (Native -> defer to Claude).
     let event: Value = if raw.trim().is_empty() {
         json!({})
     } else {
