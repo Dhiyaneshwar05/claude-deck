@@ -111,7 +111,7 @@ Actively developed. Shipped and in daily use:
 - **Session discovery + live dashboard** — scans `~/.claude` on disk, surfaces every session regardless of which client spawned it, with project grouping, health polling, and metadata enrichment.
 - **Permission Hub** — the command-bridge hook, the central approval queue, a policy engine that honors your own `settings.json`, fail-to-native safety, and auto-expiry of stale requests.
 
-Open work is tracked in [GitHub Issues](../../issues) and the phase tracker at [`docs/PHASES.md`](docs/PHASES.md). A screen recording of the hub in action is coming — see [`docs/CAPTURE_CHECKLIST.md`](docs/CAPTURE_CHECKLIST.md).
+Open work is tracked in [GitHub Issues](../../issues) and the phase tracker at [`docs/PHASES.md`](docs/PHASES.md). A screen recording of the hub in action is coming.
 
 <!-- TODO(demo): embed screen recording here — docs/demo.gif or a hosted video link -->
 

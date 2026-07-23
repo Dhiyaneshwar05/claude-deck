@@ -23,3 +23,7 @@ dist/
 # Private "shipped notes" — plain-language write-ups of each phase for my own
 # reference (interviews, explaining the work). Not part of the codebase.
 docs/shipped-notes/
+
+# Private capture guide — my own screenshot/demo shot list. Kept locally,
+# not part of the repo.
+docs/CAPTURE_CHECKLIST.md
